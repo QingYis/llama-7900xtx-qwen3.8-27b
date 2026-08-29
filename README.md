@@ -2,6 +2,12 @@
 
 ![llama](https://raw.githubusercontent.com/ggml-org/llama.brand/refs/heads/master/cover/llama-cpp/cover-llama-cpp-dark.svg)
 
+> [!NOTE]
+> **Fork additions:** ROCmFP4 (STRIX) GGUF quantization support
+> (`Q4_0_ROCMFP4` / `Q4_0_ROCMFP4_FAST`) for AMD HIP, on top of the DFlash2
+> speculative-decoding branch ([PR #27342](https://github.com/ggml-org/llama.cpp/pull/27342)).
+> See [docs/rocmfp4.md](docs/rocmfp4.md). Everything else tracks upstream llama.cpp (MIT).
+
 <div align="center">
 
 <b>LLM inference in C/C++</b>

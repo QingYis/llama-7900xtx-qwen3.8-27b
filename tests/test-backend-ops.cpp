@@ -1474,11 +1474,10 @@ struct test_case {
             double err = ud->tc->err(f1.data(), f2.data(), f1.size());
             if (err > ud->tc->max_err(ud->backend1)) {
                 printf("[%s] ERR = %.9f > %.9f ", ggml_op_desc(t1), err, ud->tc->max_err(ud->backend1));
-                //for (int i = 0; i < (int) f1.size(); i++) {
-                //    printf("%5d %9.6f %9.6f, diff = %9.6f\n", i, f1[i], f2[i], f1[i] - f2[i]);
-                //}
-                //printf("\n");
-                //exit(1);
+                for (int i = 0; i < (int) f1.size() && i < 24; i++) {
+                    printf("%5d %9.6f %9.6f diff %+.6f | ", i, f1[i], f2[i], f1[i] - f2[i]);
+                }
+                printf("\n");
                 ud->ok = false;
             }
             return true;
@@ -8218,6 +8217,7 @@ static const ggml_type all_types[] = {
     GGML_TYPE_Q1_0,
     GGML_TYPE_Q2_0,
     GGML_TYPE_MXFP4, GGML_TYPE_NVFP4,
+    GGML_TYPE_Q4_0_ROCMFP4, GGML_TYPE_Q4_0_ROCMFP4_FAST,
     GGML_TYPE_Q2_K, GGML_TYPE_Q3_K,
     GGML_TYPE_Q4_K, GGML_TYPE_Q5_K,
     GGML_TYPE_Q6_K,
@@ -9251,6 +9251,22 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     }
 
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 6, 4096, 5120, {1, 1}, {1, 1}));
+
+    // ROCmFP4: real-model shapes (hidden sizes from Qwen3.8-27B)
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0_ROCMFP4, GGML_TYPE_F32, 1, 1, 5120, {1, 1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0_ROCMFP4_FAST, GGML_TYPE_F32, 1, 1, 5120, {1, 1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0_ROCMFP4, GGML_TYPE_F32, 64, 1, 5120, {1, 1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0_ROCMFP4_FAST, GGML_TYPE_F32, 64, 1, 5120, {1, 1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0_ROCMFP4, GGML_TYPE_F32, 1, 64, 5120, {1, 1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0_ROCMFP4_FAST, GGML_TYPE_F32, 1, 64, 5120, {1, 1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0_ROCMFP4, GGML_TYPE_F32, 16, 16, 5120, {1, 1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0_ROCMFP4_FAST, GGML_TYPE_F32, 16, 16, 5120, {1, 1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0_ROCMFP4, GGML_TYPE_F32, 128, 128, 96, {1, 1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0_ROCMFP4_FAST, GGML_TYPE_F32, 128, 128, 96, {1, 1}, {1, 1}));
+    // J=16 MMQ controls (nvfp4/q4_0), keep as regression guards for the fp4 MMQ paths
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_NVFP4, GGML_TYPE_F32, 16, 9, 256, {1, 1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0, GGML_TYPE_F32, 16, 9, 256, {1, 1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0, GGML_TYPE_F32, 128, 128, 96, {1, 1}, {1, 1}));
 
 #if 0
     // test the mat-mat path for Metal
