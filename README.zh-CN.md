@@ -41,6 +41,37 @@ bash scripts/serve-dflash2.sh          # 一键拉起完整优化配置
 MODEL=... DRAFT=... PORT=8080 CTX=131072 bash scripts/serve-dflash2.sh
 ```
 
+### 完整启动参数（脚本展开后的等价命令）
+
+不想用脚本时，下面这条就是完整命令，每个参数都可以单独调整：
+
+```bash
+LLAMA_ATTN_ROT_DISABLE=1 ./build-rocmfp4/bin/llama-server \
+  -m  models/Qwen3.8-27B-heretic-ara.ROCmFP4-STRIX.gguf \   # 主模型（ROCmFP4/STRIX 格式）
+  -md models/Qwen3.8-27B-DFlash2-Q4_K_M.gguf \              # DFlash2 草稿模型
+  --mmproj models/mmproj-Qwen3.8-27B-Q8_0.gguf \            # 视觉编码器（不需要多模态可删掉此行）
+  --spec-type ngram-map-k4v,draft-dflash \                  # 两个推测器叠加，按顺序生效
+  --spec-ngram-map-k4v-size-n 12 \                          # n-gram 查找键长度
+  --spec-ngram-map-k4v-size-m 48 \                          # n-gram 命中后最多草拟的 token 数
+  --spec-ngram-map-k4v-min-hits 1 \                         # 命中所需最少出现次数
+  --spec-draft-n-max 5 \                                    # DFlash2 保留的草稿深度（实测最优 5）
+  --spec-draft-p-min 0.4 \                                  # 草稿置信度下限，低于即截断（实测最优 0.4）
+  -ctk q4_0 -ctv q4_0 \                                     # KV 缓存 4-bit 量化（省 ~14 GiB @256K）
+  -ngl 99 -ngld 99 \                                        # 主模型 / 草稿模型全部 Offload
+  -c 262144 \                                               # 256K 上下文
+  -b 2048 -ub 512 \                                         # 逻辑/物理批大小，约束 prefill 计算缓冲
+  -fa on \                                                  # 融合注意力内核
+  --jinja \                                                 # 启用模型自带聊天模板
+  --no-kv-unified \                                         # 禁用统一 KV，防 DeltaNet 跨请求全量重算
+  --parallel 1 \                                            # 单槽位（配合上一条）
+  --ctx-checkpoints 2 \                                     # 推测解码回滚快照数（默认 32 要吃 ~10 GiB）
+  --cache-ram 4096 \                                        # prompt 缓存向内存卸载 4 GiB
+  --no-warmup \                                             # 跳过启动预热（显存接近满载时避免峰值）
+  --host 0.0.0.0 --port 1234                                # 监听地址与端口
+```
+
+> 环境变量 `LLAMA_ATTN_ROT_DISABLE=1` 只在量化 KV（`-ctk/-ctv` 非 f16）时必需，混合架构的 HIP 路径未实现旋转 KV，缺了它会崩溃；纯 f16 KV 时不要设置。
+
 ## 推荐配置与优化原理（摘要）
 
 完整逐条解释（含实测扫参数据）见 [docs/rocmfp4.md](docs/rocmfp4.md)。

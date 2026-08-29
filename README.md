@@ -47,6 +47,47 @@
 
 </div>
 
+## ROCmFP4 serving (measured on RX 7900 XTX / gfx1100)
+
+```bash
+cmake -B build-rocmfp4 -DGGML_HIP=ON -DAMDGPU_TARGETS=gfx1100
+cmake --build build-rocmfp4 -j
+bash scripts/serve-dflash2.sh
+```
+
+### Complete launch command (what the script expands to)
+
+```bash
+LLAMA_ATTN_ROT_DISABLE=1 ./build-rocmfp4/bin/llama-server \
+  -m  models/Qwen3.8-27B-heretic-ara.ROCmFP4-STRIX.gguf \   # main model (ROCmFP4/STRIX)
+  -md models/Qwen3.8-27B-DFlash2-Q4_K_M.gguf \              # DFlash2 draft model
+  --mmproj models/mmproj-Qwen3.8-27B-Q8_0.gguf \            # vision encoder (drop this line to disable)
+  --spec-type ngram-map-k4v,draft-dflash \                  # stacked speculators, applied in order
+  --spec-ngram-map-k4v-size-n 12 \                          # n-gram lookup key length
+  --spec-ngram-map-k4v-size-m 48 \                          # max draft tokens on an n-gram hit
+  --spec-ngram-map-k4v-min-hits 1 \                         # minimum occurrences for a hit
+  --spec-draft-n-max 5 \                                    # DFlash2 draft depth (measured optimum)
+  --spec-draft-p-min 0.4 \                                  # draft confidence cutoff (measured optimum)
+  -ctk q4_0 -ctv q4_0 \                                     # 4-bit KV cache (~14 GiB saved @256K)
+  -ngl 99 -ngld 99 \                                        # full offload: target / draft
+  -c 262144 \                                               # 256K context
+  -b 2048 -ub 512 \                                         # logical/physical batch, bounds prefill buffers
+  -fa on \                                                  # fused attention kernels
+  --jinja \                                                 # model's own chat template
+  --no-kv-unified \                                         # prevents full-history re-prefill on hybrid archs
+  --parallel 1 \                                            # single slot (pairs with the flag above)
+  --ctx-checkpoints 2 \                                     # spec-decode rollback snapshots (default 32 ≈ 10 GiB)
+  --cache-ram 4096 \                                        # spill prompt cache entries to host RAM
+  --no-warmup \                                             # skip warm-up pass (VRAM is nearly full)
+  --host 0.0.0.0 --port 1234                                # listen address and port
+```
+
+> `LLAMA_ATTN_ROT_DISABLE=1` is required only with a quantized KV cache
+> (`-ctk/-ctv` not f16) on HIP: the hybrid-architecture cache path does not
+> implement rotated KV and will crash without it. Do not set it for f16 KV.
+
+Per-flag rationale and measured tuning sweeps: [docs/rocmfp4.md](docs/rocmfp4.md).
+
 ## Quick start
 
 A few options to get `llama.cpp` installed on your machine:
