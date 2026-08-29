@@ -611,6 +611,392 @@ void dequantize_row_nvfp4(const block_nvfp4 * GGML_RESTRICT x, float * GGML_REST
     }
 }
 
+// ---------------------------------------------------------------------------
+// ROCmFP4 (STRIX): packed 4-bit Codebook10 values with unsigned UE4M3
+// half-scales. The largest code level is 10 (not 12) so these use
+// kvalues_rocmfp4, never kvalues_fp4.
+//
+// Scale bytes are validated by ggml_validate_row_data, so decode can map
+// invalid values to 0 like the reference decode path does.
+
+static inline float rocmfp4_ue4m3_half_to_fp32(uint8_t e) {
+    // finite unsigned UE4M3 half-scale: same formula as ggml_ue4m3_to_fp32,
+    // with NaN/inf encodings clamped to 0
+    return e <= 0x7e ? ggml_ue4m3_to_fp32(e) : 0.0f;
+}
+
+static inline int8_t rocmfp4_decode(uint8_t q) {
+    q &= 0x0f;
+    const int mag3 = q & 0x07;
+    const int mag = mag3 <= 4 ? mag3 : 2*mag3 - 4;
+    return (q & 0x08) ? -mag : mag;
+}
+
+static inline uint8_t rocmfp4_best_index_scaled(float x, float inv_scale_half) {
+    // Nearest-neighbor thresholds for Codebook10:
+    //   0, +/-1, +/-2, +/-3, +/-4, +/-6, +/-8, +/-10
+    // Ties intentionally choose the lower-magnitude code (positive codes and
+    // zero appear first).
+    if (!isfinite(x)) {
+        return 0;
+    }
+
+    const float a = fabsf(x * inv_scale_half);
+    if (a <= 0.5f) {
+        return 0;
+    }
+
+    const bool neg = x < 0.0f;
+    if (a <= 1.5f) {
+        return neg ?  9 : 1;
+    }
+    if (a <= 2.5f) {
+        return neg ? 10 : 2;
+    }
+    if (a <= 3.5f) {
+        return neg ? 11 : 3;
+    }
+    if (a <= 5.0f) {
+        return neg ? 12 : 4;
+    }
+    if (a <= 7.0f) {
+        return neg ? 13 : 5;
+    }
+    if (a <= 9.0f) {
+        return neg ? 14 : 6;
+    }
+    return neg ? 15 : 7;
+}
+
+static float rocmfp4_block_err_for_scale(
+        const float * x, int n, int32_t e, float best_err, const float * mse_weights) {
+    const float scale_half = rocmfp4_ue4m3_half_to_fp32((uint8_t) e);
+    if (!(scale_half > 0.0f)) {
+        return FLT_MAX;
+    }
+    const float id = 1.0f / scale_half;
+    float err = 0.0f;
+    for (int i = 0; i < n; ++i) {
+        const float a = fabsf(x[i] * id);
+        float mag;
+        if      (a <= 0.5f) mag = 0.0f;
+        else if (a <= 1.5f) mag = 1.0f;
+        else if (a <= 2.5f) mag = 2.0f;
+        else if (a <= 3.5f) mag = 3.0f;
+        else if (a <= 5.0f) mag = 4.0f;
+        else if (a <= 7.0f) mag = 6.0f;
+        else if (a <= 9.0f) mag = 8.0f;
+        else                mag = 10.0f;
+        const float y = (x[i] < 0.0f ? -mag : mag) * scale_half;
+        const float d = x[i] - y;
+        err += (mse_weights ? mse_weights[i] : 1.0f) * d*d;
+        if (err > best_err) {
+            return err;
+        }
+    }
+    return err;
+}
+
+static uint8_t rocmfp4_choose_scale_ue4m3(
+        const float * x, int n, const float * quant_weights, float sigma2) {
+    float mse_weights[QK_ROCMFP4];
+    float max_abs = 0.0f;
+    float max_abs_weight = 0.0f;
+    for (int i = 0; i < n; ++i) {
+        const float qw = quant_weights ? quant_weights[i] : 1.0f;
+        const float ax = fabsf(x[i]);
+        const float weight = isfinite(qw) && qw > 0.0f ? qw * sqrtf(sigma2 + x[i]*x[i]) : 0.0f;
+        mse_weights[i] = weight;
+        if (ax > max_abs) {
+            max_abs = ax;
+            max_abs_weight = weight;
+        }
+    }
+    if (!(max_abs > 0.0f) || !isfinite(max_abs)) {
+        return 0;
+    }
+
+    // binary search the scale byte that fits the largest code, then walk both
+    // directions until clipping at low scales can no longer improve the error
+    float target = max_abs / 10.0f;
+    int lo = 1;
+    int hi = 126;
+    while (lo < hi) {
+        const int mid = lo + (hi - lo) / 2;
+        if (rocmfp4_ue4m3_half_to_fp32((uint8_t) mid) < target) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    const int start_e = lo;
+
+    int best_e = 0;
+    float best_err = FLT_MAX;
+    bool lower_done = false;
+
+    for (int delta = 0; delta <= 125; ++delta) {
+        const int e0 = start_e - delta;
+        if (!lower_done && e0 >= 1 && e0 <= 126) {
+            const float scale_half = rocmfp4_ue4m3_half_to_fp32((uint8_t) e0);
+            const float clip_delta = max_abs - 10.0f*scale_half;
+            if (quant_weights && max_abs_weight > 0.0f && clip_delta > 0.0f && max_abs_weight*clip_delta*clip_delta > best_err) {
+                lower_done = true;
+            } else {
+                const float err = rocmfp4_block_err_for_scale(x, n, e0, best_err, mse_weights);
+                if (err < best_err || (err == best_err && e0 < best_e)) {
+                    best_err = err;
+                    best_e = e0;
+                }
+            }
+        }
+
+        const int e1 = start_e + delta;
+        if (delta != 0 && e1 >= 1 && e1 <= 126) {
+            const float err = rocmfp4_block_err_for_scale(x, n, e1, best_err, mse_weights);
+            if (err < best_err || (err == best_err && e1 < best_e)) {
+                best_err = err;
+                best_e = e1;
+            }
+        }
+
+        if ((lower_done || e0 <= 1) && e1 >= 126) {
+            break;
+        }
+    }
+    return (uint8_t) best_e;
+}
+
+void quantize_row_q4_0_rocmfp4_ref(const float * GGML_RESTRICT x, block_rocmfp4 * GGML_RESTRICT y, int64_t k) {
+    static const int qk = QK_ROCMFP4;
+    assert(k % qk == 0);
+
+    const int nb = k / qk;
+    for (int i = 0; i < nb; i++) {
+        const float * xb = x + i*qk;
+        const uint8_t e0 = rocmfp4_choose_scale_ue4m3(xb,         qk/2, NULL, 0.0f);
+        const uint8_t e1 = rocmfp4_choose_scale_ue4m3(xb + qk/2, qk/2, NULL, 0.0f);
+        const float d0 = rocmfp4_ue4m3_half_to_fp32(e0);
+        const float d1 = rocmfp4_ue4m3_half_to_fp32(e1);
+        const float id0 = d0 > 0.0f ? 1.0f/d0 : 0.0f;
+        const float id1 = d1 > 0.0f ? 1.0f/d1 : 0.0f;
+
+        y[i].e[0] = e0;
+        y[i].e[1] = e1;
+        for (int j = 0; j < qk/2; ++j) {
+            const uint8_t q0 = rocmfp4_best_index_scaled(xb[j],         id0);
+            const uint8_t q1 = rocmfp4_best_index_scaled(xb[j + qk/2], id1);
+            y[i].qs[j] = q0 | (q1 << 4);
+        }
+    }
+}
+
+void quantize_row_q4_0_rocmfp4_fast_ref(const float * GGML_RESTRICT x, block_rocmfp4_fast * GGML_RESTRICT y, int64_t k) {
+    static const int qk = QK_ROCMFP4;
+    assert(k % qk == 0);
+
+    const int nb = k / qk;
+    for (int i = 0; i < nb; i++) {
+        const float * xb = x + i*qk;
+        const uint8_t e = rocmfp4_choose_scale_ue4m3(xb, qk, NULL, 0.0f);
+        const float d = rocmfp4_ue4m3_half_to_fp32(e);
+        const float id = d > 0.0f ? 1.0f/d : 0.0f;
+
+        y[i].e = e;
+        for (int j = 0; j < qk/2; ++j) {
+            const uint8_t q0 = rocmfp4_best_index_scaled(xb[j],         id);
+            const uint8_t q1 = rocmfp4_best_index_scaled(xb[j + qk/2], id);
+            y[i].qs[j] = q0 | (q1 << 4);
+        }
+    }
+}
+
+void dequantize_row_q4_0_rocmfp4(const block_rocmfp4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    static const int qk = QK_ROCMFP4;
+    assert(k % qk == 0);
+
+    const int nb = k / qk;
+    for (int i = 0; i < nb; i++) {
+        const float d0 = rocmfp4_ue4m3_half_to_fp32(x[i].e[0]);
+        const float d1 = rocmfp4_ue4m3_half_to_fp32(x[i].e[1]);
+        for (int j = 0; j < qk/2; ++j) {
+            y[i*qk + j]        = (float) rocmfp4_decode(x[i].qs[j] & 0x0f) * d0;
+            y[i*qk + j + qk/2] = (float) rocmfp4_decode(x[i].qs[j] >>   4) * d1;
+        }
+    }
+}
+
+void dequantize_row_q4_0_rocmfp4_fast(const block_rocmfp4_fast * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    static const int qk = QK_ROCMFP4;
+    assert(k % qk == 0);
+
+    const int nb = k / qk;
+    for (int i = 0; i < nb; i++) {
+        const float d = rocmfp4_ue4m3_half_to_fp32(x[i].e);
+        for (int j = 0; j < qk/2; ++j) {
+            y[i*qk + j]        = (float) rocmfp4_decode(x[i].qs[j] & 0x0f) * d;
+            y[i*qk + j + qk/2] = (float) rocmfp4_decode(x[i].qs[j] >>   4) * d;
+        }
+    }
+}
+
+void vec_dot_rocmfp4_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    GGML_UNUSED(bs);
+    GGML_UNUSED(bx);
+    GGML_UNUSED(by);
+    GGML_ASSERT(nrc == 1);
+    GGML_UNUSED(nrc);
+    GGML_ASSERT(n % QK_ROCMFP4 == 0);
+    GGML_ASSERT(QK_ROCMFP4 == QK8_0);
+
+    const block_rocmfp4 * x = (const block_rocmfp4 *) vx;
+    const block_q8_0    * y = (const block_q8_0 *) vy;
+
+    const int nb = n / QK_ROCMFP4;
+    float sumf = 0.0f;
+    for (int i = 0; i < nb; i++) {
+        const float d0 = rocmfp4_ue4m3_half_to_fp32(x[i].e[0]) * GGML_FP16_TO_FP32(y[i].d);
+        const float d1 = rocmfp4_ue4m3_half_to_fp32(x[i].e[1]) * GGML_FP16_TO_FP32(y[i].d);
+        int sumi0 = 0;
+        int sumi1 = 0;
+        for (int j = 0; j < QK_ROCMFP4/2; ++j) {
+            const uint8_t q = x[i].qs[j];
+            sumi0 += rocmfp4_decode(q      ) * y[i].qs[j];
+            sumi1 += rocmfp4_decode(q >>  4) * y[i].qs[j + QK_ROCMFP4/2];
+        }
+        sumf += d0 * (float) sumi0 + d1 * (float) sumi1;
+    }
+    *s = sumf;
+}
+
+void vec_dot_rocmfp4_fast_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    GGML_UNUSED(bs);
+    GGML_UNUSED(bx);
+    GGML_UNUSED(by);
+    GGML_ASSERT(nrc == 1);
+    GGML_UNUSED(nrc);
+    GGML_ASSERT(n % QK_ROCMFP4 == 0);
+    GGML_ASSERT(QK_ROCMFP4 == QK8_0);
+
+    const block_rocmfp4_fast * x = (const block_rocmfp4_fast *) vx;
+    const block_q8_0         * y = (const block_q8_0 *) vy;
+
+    const int nb = n / QK_ROCMFP4;
+    float sumf = 0.0f;
+    for (int i = 0; i < nb; i++) {
+        const float d = rocmfp4_ue4m3_half_to_fp32(x[i].e) * GGML_FP16_TO_FP32(y[i].d);
+        int sumi = 0;
+        for (int j = 0; j < QK_ROCMFP4/2; ++j) {
+            const uint8_t q = x[i].qs[j];
+            sumi += rocmfp4_decode(q      ) * y[i].qs[j];
+            sumi += rocmfp4_decode(q >>  4) * y[i].qs[j + QK_ROCMFP4/2];
+        }
+        sumf += d * (float) sumi;
+    }
+    *s = sumf;
+}
+
+// ---------------------------------------------------------------------------
+// ROCmFP4 quantize_chunk entry points (importance-matrix aware)
+
+static void rocmfp4_quantize_row_q4_0_weighted(
+        const float * GGML_RESTRICT x, block_rocmfp4 * GGML_RESTRICT y, int64_t k, const float * GGML_RESTRICT quant_weights) {
+    static const int qk = QK_ROCMFP4;
+    assert(k % qk == 0);
+
+    float sum_x2 = 0.0f;
+    for (int64_t i = 0; i < k; ++i) {
+        sum_x2 += x[i]*x[i];
+    }
+    const float sigma2 = sum_x2 / (float) k;
+
+    const int64_t nb = k / qk;
+    for (int64_t i = 0; i < nb; ++i) {
+        const float * xb = x + i*qk;
+        const float * qw = quant_weights + i*qk;
+        const uint8_t e0 = rocmfp4_choose_scale_ue4m3(xb,         qk/2, qw,         sigma2);
+        const uint8_t e1 = rocmfp4_choose_scale_ue4m3(xb + qk/2, qk/2, qw + qk/2, sigma2);
+        const float d0 = rocmfp4_ue4m3_half_to_fp32(e0);
+        const float d1 = rocmfp4_ue4m3_half_to_fp32(e1);
+        const float id0 = d0 > 0.0f ? 1.0f/d0 : 0.0f;
+        const float id1 = d1 > 0.0f ? 1.0f/d1 : 0.0f;
+
+        y[i].e[0] = e0;
+        y[i].e[1] = e1;
+        for (int j = 0; j < qk/2; ++j) {
+            const uint8_t q0 = rocmfp4_best_index_scaled(xb[j],         id0);
+            const uint8_t q1 = rocmfp4_best_index_scaled(xb[j + qk/2], id1);
+            y[i].qs[j] = q0 | (q1 << 4);
+        }
+    }
+}
+
+static void rocmfp4_quantize_row_q4_0_fast_weighted(
+        const float * GGML_RESTRICT x, block_rocmfp4_fast * GGML_RESTRICT y, int64_t k, const float * GGML_RESTRICT quant_weights) {
+    static const int qk = QK_ROCMFP4;
+    assert(k % qk == 0);
+
+    float sum_x2 = 0.0f;
+    for (int64_t i = 0; i < k; ++i) {
+        sum_x2 += x[i]*x[i];
+    }
+    const float sigma2 = sum_x2 / (float) k;
+
+    const int64_t nb = k / qk;
+    for (int64_t i = 0; i < nb; ++i) {
+        const float * xb = x + i*qk;
+        const float * qw = quant_weights + i*qk;
+        const uint8_t e = rocmfp4_choose_scale_ue4m3(xb, qk, qw, sigma2);
+        const float d = rocmfp4_ue4m3_half_to_fp32(e);
+        const float id = d > 0.0f ? 1.0f/d : 0.0f;
+
+        y[i].e = e;
+        for (int j = 0; j < qk/2; ++j) {
+            const uint8_t q0 = rocmfp4_best_index_scaled(xb[j],         id);
+            const uint8_t q1 = rocmfp4_best_index_scaled(xb[j + qk/2], id);
+            y[i].qs[j] = q0 | (q1 << 4);
+        }
+    }
+}
+
+size_t quantize_q4_0_rocmfp4(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix) {
+    const size_t row_size = ggml_row_size(GGML_TYPE_Q4_0_ROCMFP4, n_per_row);
+
+    if (!imatrix) {
+        int64_t ntensors = nrows*n_per_row;
+        quantize_row_q4_0_rocmfp4_ref(src, (block_rocmfp4 *) dst, ntensors);
+        return nrows*row_size;
+    }
+
+    char * qrow = (char *) dst;
+    for (int64_t row = 0; row < nrows; ++row) {
+        rocmfp4_quantize_row_q4_0_weighted(src, (block_rocmfp4 *) qrow, n_per_row, imatrix);
+        src  += n_per_row;
+        qrow += row_size;
+    }
+
+    return nrows*row_size;
+}
+
+size_t quantize_q4_0_rocmfp4_fast(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix) {
+    const size_t row_size = ggml_row_size(GGML_TYPE_Q4_0_ROCMFP4_FAST, n_per_row);
+
+    if (!imatrix) {
+        int64_t nrows_n = nrows*n_per_row;
+        quantize_row_q4_0_rocmfp4_fast_ref(src, (block_rocmfp4_fast *) dst, nrows_n);
+        return nrows*row_size;
+    }
+
+    char * qrow = (char *) dst;
+    for (int64_t row = 0; row < nrows; ++row) {
+        rocmfp4_quantize_row_q4_0_fast_weighted(src, (block_rocmfp4_fast *) qrow, n_per_row, imatrix);
+        src  += n_per_row;
+        qrow += row_size;
+    }
+
+    return nrows*row_size;
+}
+
 //
 // 2-6 bit quantization in super-blocks
 //
@@ -5566,6 +5952,27 @@ bool ggml_validate_row_data(enum ggml_type type, const void * data, size_t nbyte
                 // UE4M3 scales are uint8_t — all byte values are valid
                 GGML_UNUSED(data);
                 GGML_UNUSED(nb);
+            } break;
+        case GGML_TYPE_Q4_0_ROCMFP4:
+            {
+                // UE4M3 scales must be finite (<= 0x7e) — 0x7f/0x80 decode to NaN/CLI
+                const block_rocmfp4 * b = (const block_rocmfp4 *) data;
+                for (size_t i = 0; i < nb; ++i) {
+                    if (b[i].e[0] > 0x7e || b[i].e[1] > 0x7e) {
+                        fprintf(stderr, "%s: found invalid ROCmFP4 scale in block %zu\n", __func__, i);
+                        return false;
+                    }
+                }
+            } break;
+        case GGML_TYPE_Q4_0_ROCMFP4_FAST:
+            {
+                const block_rocmfp4_fast * b = (const block_rocmfp4_fast *) data;
+                for (size_t i = 0; i < nb; ++i) {
+                    if (b[i].e > 0x7e) {
+                        fprintf(stderr, "%s: found invalid ROCmFP4 scale in block %zu\n", __func__, i);
+                        return false;
+                    }
+                }
             } break;
         case GGML_TYPE_Q2_K:
             {

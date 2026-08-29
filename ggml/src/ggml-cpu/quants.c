@@ -62,6 +62,14 @@ void quantize_row_nvfp4(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, i
     quantize_row_nvfp4_ref(x, y, k);
 }
 
+void quantize_row_q4_0_rocmfp4(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
+    quantize_row_q4_0_rocmfp4_ref(x, y, k);
+}
+
+void quantize_row_q4_0_rocmfp4_fast(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
+    quantize_row_q4_0_rocmfp4_fast_ref(x, y, k);
+}
+
 //
 // 2-6 bit quantization in super-blocks
 //

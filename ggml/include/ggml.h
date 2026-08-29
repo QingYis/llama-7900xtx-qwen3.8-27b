@@ -430,7 +430,11 @@ extern "C" {
         GGML_TYPE_NVFP4   = 40, // NVFP4 (4 blocks, E4M3 scale)
         GGML_TYPE_Q1_0    = 41,
         GGML_TYPE_Q2_0    = 42,
-        GGML_TYPE_COUNT   = 43,
+        // ROCmFP4 STRIX variants (values match the GGUF artifacts produced by the
+        // ROCmFPX project, so they must keep these fixed ids)
+        GGML_TYPE_Q4_0_ROCMFP4      = 100, // ROCmFP4 dual half-block UE4M3 scales
+        GGML_TYPE_Q4_0_ROCMFP4_FAST = 101, // ROCmFP4 single-scale speed layout
+        GGML_TYPE_COUNT   = 102,
     };
 
     // precision
@@ -475,6 +479,13 @@ extern "C" {
         GGML_FTYPE_MOSTLY_NVFP4   = 26, // except 1d tensors
         GGML_FTYPE_MOSTLY_Q1_0    = 27, // except 1d tensors
         GGML_FTYPE_MOSTLY_Q2_0    = 28, // except 1d tensors
+        GGML_FTYPE_MOSTLY_Q4_0_ROCMFP4          = 100, // except 1d tensors
+        GGML_FTYPE_MOSTLY_Q4_0_ROCMFP4_LEAN     = 101, // ROCmFP4 with Q5_K token embeddings
+        GGML_FTYPE_MOSTLY_Q4_0_ROCMFP4_COHERENT = 102, // ROCmFP4 with Q6_K token embeddings
+        GGML_FTYPE_MOSTLY_Q4_0_ROCMFP4_FAST     = 103, // ROCmFP4 single-scale speed layout
+        GGML_FTYPE_MOSTLY_Q4_0_ROCMFP4_FAST_COHERENT = 104, // ROCmFP4 fast with Q6_K token embeddings
+        GGML_FTYPE_MOSTLY_Q4_0_ROCMFP4_STRIX    = 105, // ROCmFP4 Strix Halo quality/speed recipe
+        GGML_FTYPE_MOSTLY_Q4_0_ROCMFP4_STRIX_LEAN = 106, // ROCmFP4 Strix Halo size-biased K/V recipe
     };
 
     // available tensor operations:
