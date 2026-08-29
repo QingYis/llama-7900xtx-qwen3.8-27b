@@ -3,10 +3,25 @@
 ![llama](https://raw.githubusercontent.com/ggml-org/llama.brand/refs/heads/master/cover/llama-cpp/cover-llama-cpp-dark.svg)
 
 > [!NOTE]
-> **Fork additions:** ROCmFP4 (STRIX) GGUF quantization support
-> (`Q4_0_ROCMFP4` / `Q4_0_ROCMFP4_FAST`) for AMD HIP, on top of the DFlash2
-> speculative-decoding branch ([PR #27342](https://github.com/ggml-org/llama.cpp/pull/27342)).
-> See [docs/rocmfp4.md](docs/rocmfp4.md). Everything else tracks upstream llama.cpp (MIT).
+> **Fork additions** (details, rationale and measured numbers in [docs/rocmfp4.md](docs/rocmfp4.md)):
+>
+> - **ROCmFP4 (STRIX) GGUF quantization** — `Q4_0_ROCMFP4` / `Q4_0_ROCMFP4_FAST`
+>   (type 100/101): 32-value blocks, split-nibble layout (low nibbles = values
+>   0..15, high nibbles = values 16..31), Codebook10 values, half-scale UE4M3
+>   scales. Full CPU + HIP kernels: MMVQ, MMQ (incl. RDNA3 WMMA path),
+>   dequantization, `MUL_MAT_ID`.
+> - **Reference serving setup for RX 7900 XTX** — [`scripts/serve-dflash2.sh`](scripts/serve-dflash2.sh):
+>   fp4 weights + q4_0 KV cache (`LLAMA_ATTN_ROT_DISABLE=1`), DFlash2 draft
+>   (n5/p0.4) stacked with ngram-map-k4v (n12/m48), 256K context at 24 GiB
+>   (`--no-kv-unified --ctx-checkpoints 2 --cache-ram 4096`).
+>   Measured on Qwen3.8-27B: 41 tok/s fp4 baseline → 68 (reasoning content) →
+>   98 tok/s (repetitive content, ngram hits). Speculative acceptance is
+>   content-driven — creative prose stays at 30-35 on every stack.
+> - **DFlash2 speculative decoding** comes from upstream
+>   [PR #27342](https://github.com/ggml-org/llama.cpp/pull/27342) (SubSir), which
+>   this branch is based on.
+>
+> Everything else tracks upstream llama.cpp (MIT).
 
 <div align="center">
 
