@@ -878,6 +878,23 @@ static __device__ __forceinline__ uint8_t ggml_cuda_fp32_to_ue4m3(float x) {
 #endif // defined(BLACKWELL_MMA_AVAILABLE)
 }
 
+// ROCmFP4 half-scale UE4M3 (same semantics as the fork's half_finite helper):
+// NVFP4's ue4m3 map with the result halved.
+static __device__ __forceinline__ float rocmfp4_ue4m3_to_fp32_half(uint8_t x) {
+    if (x > 0x7E) { // inf / NaN encodings
+        return 0.0f;
+    }
+    const int exp = (x >> 3) & 0xF;
+    const int man = x & 0x7;
+    if (exp == 0) {
+        return (float) man * (1.0f / 1024.0f);
+    }
+    const uint32_t bits = ((uint32_t) exp + 119u) << 23 | ((uint32_t) man << 20);
+    float result;
+    memcpy(&result, &bits, sizeof(result));
+    return result;
+}
+
 __device__ __forceinline__ uint8_t ggml_cuda_float_to_fp4_e2m1(float x, float e) {
     const uint8_t sign_bit = (x < 0.0f) << 3;
     float         ax       = fabsf(x) * e;
@@ -1032,6 +1049,21 @@ struct ggml_cuda_type_traits<GGML_TYPE_NVFP4> {
     static constexpr int qk = QK_NVFP4;
     static constexpr int qr = QR_NVFP4;
     static constexpr int qi = QI_NVFP4;
+};
+
+// ROCmFP4: QK=32 halves with (dual) or without (fast) per-16-value UE4M3 scales
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_Q4_0_ROCMFP4> {
+    static constexpr int qk = QK_ROCMFP4;
+    static constexpr int qr = QR_ROCMFP4;
+    static constexpr int qi = QI_ROCMFP4;
+};
+
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_Q4_0_ROCMFP4_FAST> {
+    static constexpr int qk = QK_ROCMFP4;
+    static constexpr int qr = QR_ROCMFP4;
+    static constexpr int qi = QI_ROCMFP4;
 };
 
 template<>

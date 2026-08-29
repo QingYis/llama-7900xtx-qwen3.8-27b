@@ -360,6 +360,61 @@ static __device__ __forceinline__ float vec_dot_nvfp4_q8_1(
 
     return sum;
 }
+
+#define VDR_Q4_0_ROCMFP4_Q8_1_MMVQ 4
+#define VDR_Q4_0_ROCMFP4_FAST_Q8_1_MMVQ 2
+#define VDR_Q4_0_ROCMFP4_Q8_1_MMQ 8
+#define VDR_Q4_0_ROCMFP4_FAST_Q8_1_MMQ 8
+
+// ROCmFP4: Codebook10 nibbles (kvalues_rocmfp4) + finite unsigned UE4M3
+// half-scales (rocmfp4_ue4m3_to_fp32_half is in common.cuh). Dual keeps
+// e[0]/e[1] for the two 16-value halves of the block;
+// fast has a single scale per 32-value block.
+static __device__ __forceinline__ float vec_dot_q4_0_rocmfp4_q8_1(
+                                        const void * __restrict__ vbq,
+                                        const block_q8_1 * __restrict__ bq8_1,
+                                        const int32_t & kbx,
+                                        const int32_t & iqs) {
+
+    const block_rocmfp4 * bq4 = (const block_rocmfp4 *) vbq + kbx;
+    const int * q8 = (const int *) bq8_1->qs + iqs;
+
+    int sumi0 = 0;
+    int sumi1 = 0;
+#pragma unroll
+    for (int l = 0; l < VDR_Q4_0_ROCMFP4_Q8_1_MMVQ; ++l) {
+        const int aux_q4 = get_int_b4(bq4->qs, iqs + l);
+        const int2 v = get_int_from_table_16(aux_q4, kvalues_rocmfp4);
+
+        sumi0 = ggml_cuda_dp4a(v.x, q8[l + 0], sumi0);
+        sumi1 = ggml_cuda_dp4a(v.y, q8[l + 4], sumi1);
+    }
+
+    const float db = __low2float(bq8_1->ds);
+    return db * (rocmfp4_ue4m3_to_fp32_half(bq4->e[0]) * sumi0 + rocmfp4_ue4m3_to_fp32_half(bq4->e[1]) * sumi1);
+}
+
+static __device__ __forceinline__ float vec_dot_q4_0_rocmfp4_fast_q8_1(
+                                        const void * __restrict__ vbq,
+                                        const block_q8_1 * __restrict__ bq8_1,
+                                        const int32_t & kbx,
+                                        const int32_t & iqs) {
+
+    const block_rocmfp4_fast * bq4 = (const block_rocmfp4_fast *) vbq + kbx;
+    const int * q8 = (const int *) bq8_1->qs + iqs;
+
+    int sumi = 0;
+#pragma unroll
+    for (int l = 0; l < VDR_Q4_0_ROCMFP4_FAST_Q8_1_MMVQ; ++l) {
+        const int aux_q4 = get_int_b4(bq4->qs, iqs + l);
+        const int2 v = get_int_from_table_16(aux_q4, kvalues_rocmfp4);
+
+        sumi = ggml_cuda_dp4a(v.x, q8[l + 0], sumi);
+        sumi = ggml_cuda_dp4a(v.y, q8[l + 4], sumi);
+    }
+
+    return __low2float(bq8_1->ds) * rocmfp4_ue4m3_to_fp32_half(bq4->e) * sumi;
+}
 #define VDR_Q2_K_Q8_1_MMVQ 1
 #define VDR_Q2_K_Q8_1_MMQ  4
 
