@@ -2682,6 +2682,7 @@ bool common_speculative_process(common_speculative * spec, const llama_batch & b
     // multimodal requests bypass speculative processing entirely: the draft KV
     // injection cannot track mtmd image-chunk positions
     if (batch.n_tokens > 0 && spec->vision_skip[batch.seq_id[0][0]]) {
+        LOG_DBG("vision_skip: process bypassed\n");
         return result;
     }
 
@@ -2697,6 +2698,7 @@ void common_speculative_set_vision_skip(common_speculative * spec, llama_seq_id 
         return;
     }
     spec->vision_skip[seq_id] = skip;
+    LOG_DBG("vision_skip: seq=%d -> %s\n", (int) seq_id, skip ? "true" : "false");
 }
 
 void common_speculative_draft(common_speculative * spec) {
@@ -2713,6 +2715,7 @@ void common_speculative_draft(common_speculative * spec) {
             auto & dp = dparams[seq_id];
 
             if (dp.drafting && spec->vision_skip[seq_id]) {
+                LOG_DBG("vision_skip: drafting suppressed seq=%d\n", (int) seq_id);
                 dp.drafting = false;
             }
 

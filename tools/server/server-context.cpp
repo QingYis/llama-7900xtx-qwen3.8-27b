@@ -1650,7 +1650,11 @@ private:
         // consecutive-position invariant of the draft cache breaks). Vision
         // requests run at target-model speed; text requests keep drafting.
         if (spec) {
-            common_speculative_set_vision_skip(spec.get(), slot.id, task.tokens.has_mtmd);
+            // note: has_mtmd only means the mtmd pipeline is active (it is set for
+            // every chat request when a vision encoder is loaded); check whether
+            // this request actually carries media chunks
+            const bool has_media = task.tokens.find_next_media_chunk(0).first != nullptr;
+            common_speculative_set_vision_skip(spec.get(), slot.id, has_media);
         }
 
         // process per-request lora adapters
