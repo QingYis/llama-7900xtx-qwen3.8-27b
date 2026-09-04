@@ -74,6 +74,11 @@ bool common_speculative_process(common_speculative * spec, const llama_batch & b
 void common_speculative_draft(common_speculative * spec);
 
 // informs the speculative context that n_accepted tokens were accepted by the target model
+// multimodal (vision) requests must bypass speculative decoding: the draft KV
+// injection cannot track mtmd image-chunk positions. Set per sequence at the
+// start of a generation (and reset for text-only requests).
+void common_speculative_set_vision_skip(common_speculative * spec, llama_seq_id seq_id, bool skip);
+
 void common_speculative_accept(common_speculative * spec, llama_seq_id, uint16_t n_accepted);
 
 // (optional) get/set internal state

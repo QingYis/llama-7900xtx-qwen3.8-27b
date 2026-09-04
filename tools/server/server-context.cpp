@@ -1645,6 +1645,14 @@ private:
     }
 
     bool launch_slot_with_task(server_slot & slot, server_task && task) {
+        // multimodal (vision) prompts bypass speculative decoding entirely: the
+        // draft KV injection cannot track mtmd image-chunk positions (the strict
+        // consecutive-position invariant of the draft cache breaks). Vision
+        // requests run at target-model speed; text requests keep drafting.
+        if (spec) {
+            common_speculative_set_vision_skip(spec.get(), slot.id, task.tokens.has_mtmd);
+        }
+
         // process per-request lora adapters
         if (!task.params.lora.empty()) {
             auto task_loras = construct_lora_list(task.params.lora);

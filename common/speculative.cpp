@@ -1077,14 +1077,16 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
             return true;
         }
 
-        // Target prefill may contain token IDs or multimodal embeddings. Both
-        // produce the target-layer features used to seed the draft KV cache, so
-        // skipping the embedding batches leaves a hole in the draft's cache and
-        // the next injection fails to initialize.
+        // Only process pure-token batches. Multimodal (mtmd) image chunks arrive
+        // as embedding batches whose ubatch positions do not advance monotonically
+        // in the draft context, so injecting them breaks the draft KV cache's
+        // consecutive-position invariant ("failed to initialize batch"). Skip them
+        // like the ROCmFPX reference implementation does; the image positions are
+        // re-seeded by the following token-batch injections.
         // TODO: revisit after https://github.com/ggml-org/llama.cpp/pull/24669 is merged
         const bool has_tokens     = batch_in.token != nullptr;
         const bool has_embeddings = batch_in.embd  != nullptr;
-        if (has_tokens == has_embeddings) {
+        if (has_tokens == has_embeddings || has_embeddings) {
             return true;
         }
 
@@ -2203,6 +2205,10 @@ struct common_speculative {
 
     // which implementaion was used for a given seq_id
     std::vector<common_speculative_impl *> impl_last;
+
+    // per-seq flag: multimodal (vision) requests bypass speculative decoding
+    // entirely — the draft KV injection cannot track mtmd image-chunk positions
+    std::vector<bool> vision_skip;
 };
 
 static common_ngram_map get_common_ngram_map(
@@ -2630,7 +2636,8 @@ common_speculative * common_speculative_init(common_params_speculative & params,
     auto * result = new common_speculative {
         /* .dparams   = */ common_speculative_draft_params_vec(n_seq),
         /* .impls     = */ std::move(impls),
-        /* .impl_last = */ std::vector<common_speculative_impl *>(n_seq, nullptr)
+        /* .impl_last = */ std::vector<common_speculative_impl *>(n_seq, nullptr),
+        /* .vision_skip = */ std::vector<bool>(n_seq, false)
     };
 
     return result;
@@ -2672,11 +2679,24 @@ bool common_speculative_process(common_speculative * spec, const llama_batch & b
         return result;
     }
 
+    // multimodal requests bypass speculative processing entirely: the draft KV
+    // injection cannot track mtmd image-chunk positions
+    if (batch.n_tokens > 0 && spec->vision_skip[batch.seq_id[0][0]]) {
+        return result;
+    }
+
     for (auto & impl : spec->impls) {
         result = result && impl->process(batch);
     }
 
     return result;
+}
+
+void common_speculative_set_vision_skip(common_speculative * spec, llama_seq_id seq_id, bool skip) {
+    if (spec == nullptr || seq_id < 0 || seq_id >= (llama_seq_id) spec->vision_skip.size()) {
+        return;
+    }
+    spec->vision_skip[seq_id] = skip;
 }
 
 void common_speculative_draft(common_speculative * spec) {
@@ -2689,7 +2709,13 @@ void common_speculative_draft(common_speculative * spec) {
     {
         int n_drafting = 0;
 
-        for (auto & dp : dparams) {
+        for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) dparams.size(); ++seq_id) {
+            auto & dp = dparams[seq_id];
+
+            if (dp.drafting && spec->vision_skip[seq_id]) {
+                dp.drafting = false;
+            }
+
             GGML_ASSERT(!dp.drafting || dp.result->empty());
 
             if (dp.drafting) {
